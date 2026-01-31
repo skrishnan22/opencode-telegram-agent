@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y \
 RUN curl -fsSL https://opencode.ai/install | bash
 
 # Ensure opencode is in PATH
-ENV PATH="/root/.local/bin:${PATH}"
+ENV PATH="/root/.opencode/bin:/root/.local/bin:${PATH}"
 
 # Create app directory
 WORKDIR /app
