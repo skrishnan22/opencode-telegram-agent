@@ -1,0 +1,28 @@
+{
+  "name": "opencode-telegram-agent",
+  "version": "1.0.0",
+  "description": "Telegram bot for OpenCode CLI with Railway hosting",
+  "main": "src/server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "lint": "eslint src/",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@opencode-ai/sdk": "^1.0.0",
+    "fastify": "^5.2.1",
+    "node-pty": "^1.0.0",
+    "p-queue": "^8.1.0",
+    "get-port": "^7.1.0",
+    "zod": "^3.24.1",
+    "telegraf": "^4.16.3"
+  },
+  "devDependencies": {
+    "eslint": "^9.19.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
