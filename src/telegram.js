@@ -132,38 +132,42 @@ async function handleAgentMessage(chatId, userId, text, messageId) {
   // Queue the job
   const jobId = await jobQueue.add(chatId, userId, text, async (progressCallback) => {
     const session = await sessionManager.getOrCreateSession(chatId);
-    let lastProgressLogAt = 0;
-    
+    let lastProgressUpdateAt = 0;
+
     // Acknowledge with initial message
     const ackMsg = await bot.telegram.sendMessage(
-      chatId, 
+      chatId,
       `🔄 Processing...\nJob ID: ${jobId}\nSession: ${session.id}`,
       { reply_to_message_id: messageId }
     );
 
     logInfo('job started', { chatId, jobId, sessionId: session.id, model: session.model });
-    
+
     try {
       // Import opencode runner
       const { runOpenCode } = await import('./opencode.js');
-      
+
       const result = await runOpenCode({
         session,
         message: text,
         onProgress: async (data) => {
+          const now = Date.now();
+
+          // Throttle message updates to every 3 seconds to avoid Telegram 429 rate limits
+          if (now - lastProgressUpdateAt < 3000) {
+            return;
+          }
+          lastProgressUpdateAt = now;
+
           // Update message with progress
           const progressText = formatProgress(data);
-          const now = Date.now();
-          if (now - lastProgressLogAt > 5000) {
-            logInfo('job progress', {
-              chatId,
-              jobId,
-              elapsed: data.elapsed,
-              outputLength: data.output.length,
-              eventType: data.event?.type
-            });
-            lastProgressLogAt = now;
-          }
+          logInfo('job progress', {
+            chatId,
+            jobId,
+            elapsed: data.elapsed,
+            outputLength: data.output.length,
+            eventType: data.event?.type
+          });
           try {
             await bot.telegram.editMessageText(
               chatId,
