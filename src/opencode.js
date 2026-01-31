@@ -338,6 +338,19 @@ export async function runOpenCode({ session, message, onProgress, onApproval }) 
   logInfo('waiting for prompt and event stream to complete', { sessionId: opencodeSessionId });
   const [result] = await Promise.all([promptPromise, eventPromise]);
 
+  // FALLBACK: If event streaming didn't provide content, extract from prompt result
+  if (outputBuffer.length === 0 && result?.data?.parts) {
+    logInfo('event stream provided no content, using prompt result fallback', {
+      partsCount: result.data.parts.length,
+      partTypes: result.data.parts.map(p => p.type)
+    });
+    for (const part of result.data.parts) {
+      if (part.type === 'text' && part.text) {
+        outputBuffer.push(part.text);
+      }
+    }
+  }
+
   logInfo('runOpenCode completed', {
     sessionId: opencodeSessionId,
     outputLength: outputBuffer.join('').length,
