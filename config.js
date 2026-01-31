@@ -10,7 +10,7 @@ const configSchema = z.object({
   PORT: z.string().default('3000'),
   NODE_ENV: z.enum(['development', 'production']).default('development'),
   XDG_DATA_HOME: z.string().default('/data'),
-  DEFAULT_MODEL: z.string().default('openai/gpt-5.2-codex'),
+  DEFAULT_MODEL: z.string().default('kimi/kimi-k2.5-free'),
   MAX_CONCURRENT_JOBS: z.string().transform((val) => parseInt(val, 10)).default('2'),
   SESSION_IDLE_TIMEOUT_HOURS: z.string().transform((val) => parseInt(val, 10)).default('3'),
   DATA_DIR: z.string().default('/data'),

@@ -5,6 +5,71 @@ import getPort from 'get-port';
 import { createOpencode, createOpencodeClient } from '@opencode-ai/sdk';
 import { config } from '../config.js';
 
+const LOG_PREFIX = 'opencode';
+
+function logInfo(message, meta) {
+  if (meta) {
+    console.info(`[${LOG_PREFIX}] ${message}`, meta);
+  } else {
+    console.info(`[${LOG_PREFIX}] ${message}`);
+  }
+}
+
+function logError(message, meta) {
+  if (meta) {
+    console.error(`[${LOG_PREFIX}] ${message}`, meta);
+  } else {
+    console.error(`[${LOG_PREFIX}] ${message}`);
+  }
+}
+
+function createLineLogger(logFn, label) {
+  let buffer = '';
+  return (data) => {
+    buffer += data.toString();
+    const lines = buffer.split('\n');
+    buffer = lines.pop() ?? '';
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (trimmed) {
+        logFn(`${label}: ${trimmed}`);
+      }
+    }
+  };
+}
+
+async function respondToPermission(client, { sessionID, requestID, reply, message }) {
+  if (client?.permission?.reply) {
+    return client.permission.reply({
+      requestID,
+      reply,
+      message
+    });
+  }
+
+  if (client?.permission?.respond) {
+    return client.permission.respond({
+      sessionID,
+      permissionID: requestID,
+      response: reply
+    });
+  }
+
+  if (client?.session?.postSessionByIdPermissionsByPermissionId) {
+    return client.session.postSessionByIdPermissionsByPermissionId({
+      path: {
+        id: sessionID,
+        permissionID: requestID
+      },
+      body: {
+        response: reply
+      }
+    });
+  }
+
+  throw new Error('No permission reply method available in SDK client');
+}
+
 /**
  * Start OpenCode server for a session
  */
@@ -13,10 +78,13 @@ export async function startOpenCodeServer(session) {
   const port = await getPort();
   
   // Start server process
+  logInfo('starting OpenCode server', { port, workspace: session.workspacePath });
   const serverProcess = spawn('opencode', [
     'serve',
     '--hostname', '127.0.0.1',
-    '--port', port.toString()
+    '--port', port.toString(),
+    '--print-logs',
+    '--log-level', 'INFO'
   ], {
     cwd: session.workspacePath,
     env: {
@@ -28,11 +96,24 @@ export async function startOpenCodeServer(session) {
     stdio: ['ignore', 'pipe', 'pipe']
   });
 
+  const stdoutLogger = createLineLogger(logInfo, 'server');
+  const stderrLogger = createLineLogger(logError, 'server');
+  serverProcess.stdout?.on('data', stdoutLogger);
+  serverProcess.stderr?.on('data', stderrLogger);
+  serverProcess.on('exit', (code, signal) => {
+    logError('OpenCode server exited', { code, signal, port });
+  });
+  serverProcess.on('error', (error) => {
+    logError('OpenCode server spawn error', { error: error.message, port });
+  });
+
   session.serverProcess = serverProcess;
   session.serverPort = port;
 
   // Wait for server to be ready
   await waitForServer(port);
+
+  logInfo('OpenCode server ready', { port });
 
   return port;
 }
@@ -53,75 +134,141 @@ export async function runOpenCode({ session, message, onProgress, onApproval }) 
   // Get or create OpenCode session
   let opencodeSessionId = session.opencodeSessionId;
   if (!opencodeSessionId) {
+    logInfo('creating OpenCode session', { chatId: session.chatId });
     const newSession = await client.session.create({
       body: { title: `Telegram session ${session.chatId}` }
     });
     opencodeSessionId = newSession.data.id;
     session.opencodeSessionId = opencodeSessionId;
+    logInfo('OpenCode session created', { sessionId: opencodeSessionId });
   }
 
   // Parse model
   const [providerId, modelId] = session.model.split('/');
+  logInfo('running prompt', { sessionId: opencodeSessionId, model: session.model });
 
   // Subscribe to events
   const events = await client.event.subscribe();
+  logInfo('event stream subscribed', { sessionId: opencodeSessionId });
   const outputBuffer = [];
+  const completedTextParts = new Set();
+  const textPartLengths = new Map();
   let startTime = Date.now();
 
   // Send the prompt
-  const promptPromise = client.session.prompt({
-    path: { id: opencodeSessionId },
-    body: {
-      model: { providerID: providerId, modelID: modelId },
-      parts: [{ type: 'text', text: message }]
-    }
-  });
+  const promptPromise = client.session
+    .prompt({
+      path: { id: opencodeSessionId },
+      body: {
+        model: { providerID: providerId, modelID: modelId },
+        parts: [{ type: 'text', text: message }]
+      }
+    })
+    .then((result) => {
+      logInfo('prompt accepted', { sessionId: opencodeSessionId });
+      return result;
+    })
+    .catch((error) => {
+      logError('prompt failed', { sessionId: opencodeSessionId, error: error.message });
+      throw error;
+    });
 
   // Handle events concurrently
   const eventPromise = (async () => {
-    for await (const event of events.stream) {
-      if (event.type === 'message') {
-        // Collect output
-        const content = extractContent(event);
-        if (content) {
-          outputBuffer.push(content);
+    try {
+      for await (const event of events.stream) {
+        const sessionIdFromEvent =
+          event.properties?.sessionID ||
+          event.properties?.part?.sessionID ||
+          event.properties?.info?.id ||
+          event.properties?.info?.sessionID;
+
+        if (sessionIdFromEvent && sessionIdFromEvent !== opencodeSessionId) {
+          continue;
         }
 
-        // Report progress
-        if (onProgress) {
-          onProgress({
-            output: outputBuffer.join('\n'),
-            elapsed: Math.floor((Date.now() - startTime) / 1000),
-            event
-          });
-        }
-      } else if (event.type === 'permission_request') {
-        // Handle permission request
-        if (onApproval) {
-          const decision = await onApproval({
-            id: event.properties.permission_id,
-            tool: event.properties.tool,
-            input: event.properties.input
-          });
+        logInfo('event', { type: event.type, sessionId: sessionIdFromEvent });
 
-          // Respond to permission
-          await client.session.postSessionByIdPermissionsByPermissionId({
-            path: { 
-              id: opencodeSessionId, 
-              permissionID: event.properties.permission_id 
-            },
-            body: {
-              response: decision.approved ? 'allow' : 'deny',
-              remember: decision.remember
+        if (event.type === 'message.part.updated') {
+          const part = event.properties?.part;
+          if (!part || part.sessionID !== opencodeSessionId) {
+            continue;
+          }
+
+          if (part.type === 'text') {
+            if (event.properties?.delta) {
+              outputBuffer.push(event.properties.delta);
+              const current = textPartLengths.get(part.id) || 0;
+              textPartLengths.set(part.id, current + event.properties.delta.length);
+            } else if (part.time?.end && !completedTextParts.has(part.id)) {
+              if (!textPartLengths.has(part.id)) {
+                outputBuffer.push(part.text || '');
+              }
+              completedTextParts.add(part.id);
             }
+          }
+
+          if (onProgress) {
+            onProgress({
+              output: outputBuffer.join(''),
+              elapsed: Math.floor((Date.now() - startTime) / 1000),
+              event
+            });
+          }
+        }
+
+        if (event.type === 'session.error') {
+          const errorMessage = event.properties?.error?.data?.message || event.properties?.error?.name || 'OpenCode session error';
+          logError('session error', { sessionId: opencodeSessionId, error: errorMessage });
+          throw new Error(errorMessage);
+        }
+
+        if (event.type === 'session.idle') {
+          if (event.properties?.sessionID === opencodeSessionId) {
+            logInfo('session idle', { sessionId: opencodeSessionId });
+            break;
+          }
+        }
+
+        if (event.type === 'permission.asked' || event.type === 'permission.updated') {
+          if (!onApproval) {
+            continue;
+          }
+
+          const permission = event.properties;
+          const requestId = permission.id || permission.requestID || permission.permissionID;
+          if (!requestId) {
+            logError('permission event missing id', { event });
+            continue;
+          }
+
+          const decision = await onApproval({
+            id: requestId,
+            tool: permission.permission || permission.type,
+            input: permission.metadata || {}
           });
 
-          // Cache permission if "remember"
-          if (decision.remember && decision.approved) {
-            session.permissions[event.properties.tool] = 'allow';
+          const reply = decision.approved ? (decision.remember ? 'always' : 'once') : 'reject';
+
+          await respondToPermission(client, {
+            sessionID: opencodeSessionId,
+            requestID: requestId,
+            reply
+          });
+
+          if (decision.remember && decision.approved && (permission.permission || permission.type)) {
+            session.permissions[permission.permission || permission.type] = 'allow';
           }
         }
       }
+
+      logInfo('event stream completed', {
+        sessionId: opencodeSessionId,
+        outputLength: outputBuffer.join('').length
+      });
+    } catch (error) {
+      logError('event stream error', { error: error.message });
+      throw error;
     }
   })();
 
@@ -132,7 +279,7 @@ export async function runOpenCode({ session, message, onProgress, onApproval }) 
   await syncAuthFromSession(session);
 
   return {
-    output: outputBuffer.join('\n'),
+    output: outputBuffer.join(''),
     duration: Math.floor((Date.now() - startTime) / 1000),
     result
   };
@@ -197,19 +344,6 @@ async function waitForServer(port, timeout = 30000) {
   }
   
   throw new Error('OpenCode server failed to start');
-}
-
-/**
- * Extract text content from event
- */
-function extractContent(event) {
-  if (event.properties?.parts) {
-    return event.properties.parts
-      .filter(p => p.type === 'text')
-      .map(p => p.text)
-      .join('');
-  }
-  return null;
 }
 
 /**

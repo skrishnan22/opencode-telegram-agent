@@ -47,17 +47,30 @@ export async function performLogin({ provider, onUrl }) {
     let resolved = false;
     let killed = false;
     let lastOutputLogAt = 0;
+    let selectionSent = false;
+    let selectionTimer = null;
+    let enterPulseTimer = null;
+    let enterPulseCount = 0;
+    let writeInput = null;
+    let isPty = false;
 
     const finalize = (result) => {
       if (resolved) {
         return;
       }
       resolved = true;
+      if (selectionTimer) {
+        clearTimeout(selectionTimer);
+      }
+      if (enterPulseTimer) {
+        clearInterval(enterPulseTimer);
+      }
       resolve(result);
     };
 
     const providerKey = typeof provider === 'string' ? provider.toLowerCase() : '';
     const providerLabel = PROVIDER_LABELS[providerKey] || provider;
+    const providerInput = providerKey || providerLabel;
 
     const env = {
       ...process.env,
@@ -65,7 +78,60 @@ export async function performLogin({ provider, onUrl }) {
       TERM: 'xterm-256color'
     };
 
-    logInfo('starting login process', { provider: providerLabel, XDG_DATA_HOME: config.XDG_DATA_HOME });
+    logInfo('starting login process', {
+      provider: providerLabel,
+      providerInput,
+      XDG_DATA_HOME: config.XDG_DATA_HOME
+    });
+
+    const sendInput = (value) => {
+      if (!writeInput || killed || resolved) {
+        return;
+      }
+      const payload = isPty ? value : value.replace(/\r/g, '\n');
+      writeInput(payload);
+    };
+
+    const startEnterPulse = () => {
+      if (enterPulseTimer) {
+        return;
+      }
+
+      enterPulseTimer = setInterval(() => {
+        if (killed || resolved || urlFound) {
+          clearInterval(enterPulseTimer);
+          enterPulseTimer = null;
+          return;
+        }
+
+        enterPulseCount += 1;
+        logInfo('sending enter to advance login', { count: enterPulseCount });
+        sendInput('\r');
+
+        if (enterPulseCount >= 6) {
+          clearInterval(enterPulseTimer);
+          enterPulseTimer = null;
+        }
+      }, 3000);
+    };
+
+    const sendProviderSelection = () => {
+      if (selectionSent) {
+        return;
+      }
+      selectionSent = true;
+
+      if (providerInput) {
+        logInfo('sending provider selection', { provider: providerInput });
+        sendInput(providerInput);
+        sendInput('\r');
+      } else {
+        logInfo('sending default provider selection');
+        sendInput('\r');
+      }
+
+      startEnterPulse();
+    };
 
     const handleOutput = (data) => {
       const text = stripAnsi(data.toString());
@@ -93,6 +159,13 @@ export async function performLogin({ provider, onUrl }) {
         logInfo('login completed successfully');
         finalize({ success: true });
       }
+
+      if (!selectionSent) {
+        const normalized = text.toLowerCase();
+        if (normalized.includes('select provider') || normalized.includes('add credential')) {
+          sendProviderSelection();
+        }
+      }
     };
 
     let processHandle = null;
@@ -100,7 +173,8 @@ export async function performLogin({ provider, onUrl }) {
     try {
       if (pty && typeof pty.spawn === 'function') {
         logInfo('using PTY for login');
-        const opencode = pty.spawn('opencode', ['auth', 'login'], {
+        isPty = true;
+        const opencode = pty.spawn('opencode', ['--print-logs', '--log-level', 'INFO', 'auth', 'login'], {
           name: 'xterm-256color',
           cols: 80,
           rows: 24,
@@ -109,6 +183,7 @@ export async function performLogin({ provider, onUrl }) {
         });
 
         processHandle = opencode;
+        writeInput = (value) => opencode.write(value);
         opencode.onData(handleOutput);
         opencode.onExit(({ exitCode }) => {
           logInfo('login process exited', { exitCode });
@@ -122,28 +197,17 @@ export async function performLogin({ provider, onUrl }) {
           }
         });
 
-        setTimeout(() => {
-          if (killed) {
-            return;
-          }
-
-          if (providerLabel) {
-            logInfo('sending provider selection', { provider: providerLabel });
-            opencode.write(providerLabel);
-            opencode.write('\r');
-          } else {
-            logInfo('sending default provider selection');
-            opencode.write('\r');
-          }
-        }, 500);
+        selectionTimer = setTimeout(sendProviderSelection, 1500);
       } else {
         logInfo('using stdio for login');
-        const opencode = spawnChild('opencode', ['auth', 'login'], {
+        isPty = false;
+        const opencode = spawnChild('opencode', ['--print-logs', '--log-level', 'INFO', 'auth', 'login'], {
           env,
           stdio: ['pipe', 'pipe', 'pipe']
         });
 
         processHandle = opencode;
+        writeInput = (value) => opencode.stdin.write(value);
         opencode.stdout.on('data', handleOutput);
         opencode.stderr.on('data', handleOutput);
 
@@ -167,19 +231,7 @@ export async function performLogin({ provider, onUrl }) {
           });
         });
 
-        setTimeout(() => {
-          if (killed) {
-            return;
-          }
-
-          if (providerLabel) {
-            logInfo('sending provider selection', { provider: providerLabel });
-            opencode.stdin.write(`${providerLabel}\n`);
-          } else {
-            logInfo('sending default provider selection');
-            opencode.stdin.write('\n');
-          }
-        }, 500);
+        selectionTimer = setTimeout(sendProviderSelection, 1500);
       }
     } catch (error) {
       logError('login setup failed', { error: error.message });
@@ -193,7 +245,7 @@ export async function performLogin({ provider, onUrl }) {
     setTimeout(() => {
       if (processHandle && !killed) {
         killed = true;
-        logError('login timed out');
+        logError('login timed out', { output: outputBuffer.slice(-500) });
         processHandle.kill();
         finalize({
           success: false,

@@ -91,7 +91,7 @@ async function handleCommand(chatId, userId, text) {
       
     case '/model':
       if (!args) {
-        await bot.telegram.sendMessage(chatId, '❌ Please provide a model ID. Example: /model openai/gpt-5.2-codex');
+        await bot.telegram.sendMessage(chatId, '❌ Please provide a model ID. Example: /model kimi/kimi-k2.5-free');
         return;
       }
       await sessionManager.setSessionModel(chatId, args);
@@ -132,6 +132,7 @@ async function handleAgentMessage(chatId, userId, text, messageId) {
   // Queue the job
   const jobId = await jobQueue.add(chatId, userId, text, async (progressCallback) => {
     const session = await sessionManager.getOrCreateSession(chatId);
+    let lastProgressLogAt = 0;
     
     // Acknowledge with initial message
     const ackMsg = await bot.telegram.sendMessage(
@@ -139,6 +140,8 @@ async function handleAgentMessage(chatId, userId, text, messageId) {
       `🔄 Processing...\nJob ID: ${jobId}\nSession: ${session.id}`,
       { reply_to_message_id: messageId }
     );
+
+    logInfo('job started', { chatId, jobId, sessionId: session.id, model: session.model });
     
     try {
       // Import opencode runner
@@ -150,6 +153,17 @@ async function handleAgentMessage(chatId, userId, text, messageId) {
         onProgress: async (data) => {
           // Update message with progress
           const progressText = formatProgress(data);
+          const now = Date.now();
+          if (now - lastProgressLogAt > 5000) {
+            logInfo('job progress', {
+              chatId,
+              jobId,
+              elapsed: data.elapsed,
+              outputLength: data.output.length,
+              eventType: data.event?.type
+            });
+            lastProgressLogAt = now;
+          }
           try {
             await bot.telegram.editMessageText(
               chatId,
@@ -159,10 +173,16 @@ async function handleAgentMessage(chatId, userId, text, messageId) {
               { parse_mode: 'Markdown' }
             );
           } catch (e) {
-            // Ignore edit errors (rate limits, etc.)
+            logError('progress update failed', { chatId, jobId, error: e.message });
           }
         },
         onApproval: async (permissionData) => {
+          logInfo('permission request', {
+            chatId,
+            jobId,
+            permissionId: permissionData.id,
+            tool: permissionData.tool
+          });
           // Send approval request with inline buttons
           const keyboard = {
             inline_keyboard: [[
@@ -194,6 +214,7 @@ async function handleAgentMessage(chatId, userId, text, messageId) {
           { source: Buffer.from(result.output), filename: `output-${jobId}.txt` },
           { caption: `✅ Job completed\nDuration: ${result.duration}s`, reply_to_message_id: messageId }
         );
+        logInfo('job completed (file)', { chatId, jobId, duration: result.duration });
       } else {
         await bot.telegram.editMessageText(
           chatId,
@@ -202,9 +223,11 @@ async function handleAgentMessage(chatId, userId, text, messageId) {
           `✅ *Completed*\n\n${result.output.slice(0, 3500)}`,
           { parse_mode: 'Markdown' }
         );
+        logInfo('job completed', { chatId, jobId, duration: result.duration });
       }
       
     } catch (error) {
+      logError('job failed', { chatId, jobId, error: error.message });
       await bot.telegram.editMessageText(
         chatId,
         ackMsg.message_id,
@@ -369,7 +392,7 @@ function getHelpText() {
 *Commands:*
 /new - Start a new session
 /end - End current session and cleanup
-/model <id> - Set the model (e.g., /model openai/gpt-5.2-codex)
+ /model <id> - Set the model (e.g., /model kimi/kimi-k2.5-free)
 /models - List available models
 /login openai - Login with OpenAI subscription
 /cancel - Cancel running jobs
@@ -378,7 +401,7 @@ function getHelpText() {
 *Usage:*
 Simply type a message to send it to the agent. Each chat maintains its own session and workspace.
 
-Default model: openai/gpt-5.2-codex
+ Default model: kimi/kimi-k2.5-free
 `;
 }
 
