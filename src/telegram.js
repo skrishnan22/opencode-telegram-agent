@@ -5,6 +5,24 @@ import { jobQueue } from './queue.js';
 
 const bot = new Telegraf(config.TELEGRAM_BOT_TOKEN);
 
+const LOG_PREFIX = 'telegram';
+
+function logInfo(message, meta) {
+  if (meta) {
+    console.info(`[${LOG_PREFIX}] ${message}`, meta);
+  } else {
+    console.info(`[${LOG_PREFIX}] ${message}`);
+  }
+}
+
+function logError(message, meta) {
+  if (meta) {
+    console.error(`[${LOG_PREFIX}] ${message}`, meta);
+  } else {
+    console.error(`[${LOG_PREFIX}] ${message}`);
+  }
+}
+
 export async function setupTelegramWebhook() {
   const webhookUrl = `${config.PUBLIC_BASE_URL}/webhook`;
   
@@ -60,11 +78,13 @@ async function handleCommand(chatId, userId, text) {
   
   switch (command) {
     case '/new':
+      logInfo('command /new', { chatId, userId });
       await sessionManager.createNewSession(chatId);
       await bot.telegram.sendMessage(chatId, '✨ New session created! Workspace is ready.');
       break;
       
     case '/end':
+      logInfo('command /end', { chatId, userId });
       await sessionManager.endSession(chatId);
       await bot.telegram.sendMessage(chatId, '👋 Session ended. Workspace cleaned up.');
       break;
@@ -79,11 +99,13 @@ async function handleCommand(chatId, userId, text) {
       break;
       
     case '/models':
+      logInfo('command /models', { chatId, userId });
       await handleModelsCommand(chatId);
       break;
       
     case '/login':
       if (args === 'openai') {
+        logInfo('command /login openai', { chatId, userId });
         await handleLoginOpenAI(chatId);
       } else {
         await bot.telegram.sendMessage(chatId, '❌ Usage: /login openai');
@@ -91,14 +113,17 @@ async function handleCommand(chatId, userId, text) {
       break;
       
     case '/cancel':
+      logInfo('command /cancel', { chatId, userId });
       await handleCancel(chatId);
       break;
       
     case '/help':
+      logInfo('command /help', { chatId, userId });
       await bot.telegram.sendMessage(chatId, getHelpText());
       break;
       
     default:
+      logInfo('command unknown', { chatId, userId, command });
       await bot.telegram.sendMessage(chatId, '❓ Unknown command. Use /help for available commands.');
   }
 }
@@ -273,9 +298,12 @@ async function handleLoginOpenAI(chatId) {
   try {
     const { performLogin } = await import('./login.js');
 
+    logInfo('starting OpenAI login flow', { chatId });
+
     performLogin({
       provider: 'openai',
       onUrl: async (url) => {
+        logInfo('sending login url to user', { chatId });
         await bot.telegram.editMessageText(
           chatId,
           loadingMsg.message_id,
@@ -287,6 +315,7 @@ async function handleLoginOpenAI(chatId) {
     })
       .then(async (result) => {
         if (result.success) {
+          logInfo('login flow completed successfully', { chatId });
           await bot.telegram.editMessageText(
             chatId,
             loadingMsg.message_id,
@@ -294,6 +323,7 @@ async function handleLoginOpenAI(chatId) {
             '✅ Successfully logged in to OpenAI!\n\nYou can now start using the agent.'
           );
         } else {
+          logError('login flow failed', { chatId, error: result.error });
           await bot.telegram.editMessageText(
             chatId,
             loadingMsg.message_id,
@@ -303,6 +333,7 @@ async function handleLoginOpenAI(chatId) {
         }
       })
       .catch(async (error) => {
+        logError('login flow error', { chatId, error: error.message });
         await bot.telegram.editMessageText(
           chatId,
           loadingMsg.message_id,
@@ -311,6 +342,7 @@ async function handleLoginOpenAI(chatId) {
         );
       });
   } catch (error) {
+    logError('login flow setup error', { chatId, error: error.message });
     await bot.telegram.editMessageText(
       chatId,
       loadingMsg.message_id,
