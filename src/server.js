@@ -30,13 +30,11 @@ fastify.post('/webhook', async (request, reply) => {
   const update = request.body;
   fastify.log.debug({ update }, 'Received Telegram update');
   
-  try {
-    await handleTelegramUpdate(update);
-    return { ok: true };
-  } catch (error) {
+  void handleTelegramUpdate(update).catch((error) => {
     fastify.log.error({ error }, 'Failed to handle update');
-    return reply.status(500).send({ error: 'Internal error' });
-  }
+  });
+
+  return { ok: true };
 });
 
 async function start() {

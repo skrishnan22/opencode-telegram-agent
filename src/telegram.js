@@ -272,8 +272,8 @@ async function handleLoginOpenAI(chatId) {
   
   try {
     const { performLogin } = await import('./login.js');
-    
-    const result = await performLogin({
+
+    performLogin({
       provider: 'openai',
       onUrl: async (url) => {
         await bot.telegram.editMessageText(
@@ -284,23 +284,32 @@ async function handleLoginOpenAI(chatId) {
           { parse_mode: 'Markdown', disable_web_page_preview: true }
         );
       }
-    });
-    
-    if (result.success) {
-      await bot.telegram.editMessageText(
-        chatId,
-        loadingMsg.message_id,
-        undefined,
-        '✅ Successfully logged in to OpenAI!\n\nYou can now start using the agent.'
-      );
-    } else {
-      await bot.telegram.editMessageText(
-        chatId,
-        loadingMsg.message_id,
-        undefined,
-        `❌ Login failed: ${result.error}`
-      );
-    }
+    })
+      .then(async (result) => {
+        if (result.success) {
+          await bot.telegram.editMessageText(
+            chatId,
+            loadingMsg.message_id,
+            undefined,
+            '✅ Successfully logged in to OpenAI!\n\nYou can now start using the agent.'
+          );
+        } else {
+          await bot.telegram.editMessageText(
+            chatId,
+            loadingMsg.message_id,
+            undefined,
+            `❌ Login failed: ${result.error}`
+          );
+        }
+      })
+      .catch(async (error) => {
+        await bot.telegram.editMessageText(
+          chatId,
+          loadingMsg.message_id,
+          undefined,
+          `❌ Login error: ${error.message}`
+        );
+      });
   } catch (error) {
     await bot.telegram.editMessageText(
       chatId,
